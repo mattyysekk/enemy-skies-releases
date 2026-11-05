@@ -1,0 +1,52 @@
+# Paradoxiie by hand: post (or post again) a version's notes to the Discord dev-log channel.
+# Actions tab > "Announce on Discord" > Run workflow, and type the version (blank: the last one built).
+name: Announce on Discord
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to announce (blank: the last one built)'
+        required: false
+        default: ''
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: releases
+
+      - name: Which version
+        id: what
+        shell: bash
+        run: |
+          version="${{ github.event.inputs.version }}"
+          [ -n "$version" ] || version=$(grep '^version=' releases/last-build.txt | cut -d= -f2 | tr -d '\r ')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Get the game's changelog
+        uses: actions/checkout@v4
+        with:
+          repository: mattyysekk/enemy-skies
+          token: ${{ secrets.SOURCE_TOKEN }}
+          path: game
+          sparse-checkout: CHANGELOG.md
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Post it
+        shell: bash
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK" ]; then
+            echo "::error::Add the DISCORD_WEBHOOK secret first (Settings > Secrets and variables > Actions)."
+            exit 1
+          fi
+          version="${{ steps.what.outputs.version }}"
+          node releases/.github/paradoxiie/announce.mjs game/CHANGELOG.md "$version" "https://github.com/$GITHUB_REPOSITORY/releases/tag/v$version"
