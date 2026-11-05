@@ -1,0 +1,9 @@
+# How Enemy Skies is built. Usually nothing here needs changing: a new version is released by itself
+# when the version in the game's Project Settings (Application > Config > Version) goes up and is pushed.
+#
+# godot: the Godot version that exports the game (must match the editor you use)
+godot=4.6.3-stable
+# mode: release, or debug (a debug build also opens a console window with the game's output)
+mode=release
+# version: leave blank to use the project's version; set it to force a particular version number
+version=

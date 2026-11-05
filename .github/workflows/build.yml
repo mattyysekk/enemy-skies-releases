@@ -1,0 +1,228 @@
+# Builds Enemy Skies for Windows with Godot and publishes it here as the newest release (the previous one
+# stays too), where the Paradoxiie Launcher picks it up.
+#
+# It looks every 30 minutes: when the version in the game's Project Settings (Application > Config > Version)
+# is higher than the last release, it builds. Run it by hand from the Actions tab to build right away.
+# The game's code lives in a private repository: SOURCE_TOKEN is a token that can read it.
+name: Build and release
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  push:
+    branches: [main]
+    paths: [build.txt, .github/workflows/build.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPO: mattyysekk/enemy-skies
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: releases
+
+      - name: Is there a new version?
+        id: what
+        shell: bash
+        env:
+          SOURCE_TOKEN: ${{ secrets.SOURCE_TOKEN }}
+        run: |
+          if [ -z "$SOURCE_TOKEN" ]; then
+            echo "::error::Add the SOURCE_TOKEN secret (Settings > Secrets and variables > Actions): a token that can read $SOURCE_REPO."
+            exit 1
+          fi
+          setting() { grep "^$1=" releases/build.txt | head -1 | cut -d= -f2- | tr -d '\r ' ; }
+          godot=$(setting godot); mode=$(setting mode); forced=$(setting version)
+          [ -n "$godot" ] || godot=4.6.3-stable
+          [ "$mode" = debug ] || mode=release
+          # the project's version, read straight from GitHub (cheap: no checkout unless there's something to build)
+          project=$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/$SOURCE_REPO/contents/project.godot" -H "Accept: application/vnd.github.raw" 2>err.txt) || {
+            echo "::error::Could not read $SOURCE_REPO: $(cat err.txt). Check that SOURCE_TOKEN can read it."
+            exit 1
+          }
+          version=$(printf '%s\n' "$project" | sed -n 's/^config\/version="\(.*\)"/\1/p' | head -1 | tr -d '\r')
+          [ -z "$forced" ] || version="$forced"
+          if [ -z "$version" ]; then
+            echo "::warning::The game has no version yet: set one in Godot (Project Settings > Application > Config > Version), commit and push."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          commit=$(GH_TOKEN="$SOURCE_TOKEN" gh api "repos/$SOURCE_REPO/commits/HEAD" --jq .sha)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "godot=$godot" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          assets=$(gh release view "v$version" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          if echo "$assets" | grep -q 'windows\.zip$'; then
+            echo "v$version is already released. Raise the game's version to release again."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Building v$version from $commit with Godot $godot ($mode)."
+          fi
+
+      - name: Get the game's code
+        if: steps.what.outputs.skip != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SOURCE_REPO }}
+          token: ${{ secrets.SOURCE_TOKEN }}
+          ref: ${{ steps.what.outputs.commit }}
+          path: game
+          fetch-depth: 0
+
+      - name: Cache Godot
+        if: steps.what.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/godot-dl
+          key: godot-${{ steps.what.outputs.godot }}
+
+      - name: Get Godot and its export templates
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        run: |
+          v="${{ steps.what.outputs.godot }}"
+          base="https://github.com/godotengine/godot-builds/releases/download/$v"
+          mkdir -p ~/godot-dl && cd ~/godot-dl
+          [ -f "Godot_v${v}_linux.x86_64.zip" ] || curl -fsSL -o "Godot_v${v}_linux.x86_64.zip" "$base/Godot_v${v}_linux.x86_64.zip"
+          [ -f "Godot_v${v}_export_templates.tpz" ] || curl -fsSL -o "Godot_v${v}_export_templates.tpz" "$base/Godot_v${v}_export_templates.tpz"
+          mkdir -p ~/godot && unzip -oq "Godot_v${v}_linux.x86_64.zip" -d ~/godot
+          mv ~/godot/Godot_v${v}_linux.x86_64 ~/godot/godot && chmod +x ~/godot/godot
+          # templates go in a folder named like "4.6.3.stable"
+          tdir=~/.local/share/godot/export_templates/${v/-/.}
+          mkdir -p "$tdir" && unzip -oq "Godot_v${v}_export_templates.tpz" -d ~/tpl && cp -r ~/tpl/templates/. "$tdir/"
+          ~/godot/godot --version
+
+      - name: Make sure there's a Windows export preset
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        working-directory: game
+        run: |
+          name=$(awk -F'"' '/^\[preset\.[0-9]+\]$/{p=1;n="";next} p&&/^name=/{n=$2} p&&/^platform="Windows Desktop"/{print n; exit}' export_presets.cfg 2>/dev/null || true)
+          if [ -z "$name" ]; then
+            echo "::notice::No Windows export preset in the project: using a standard one (the whole game in one .exe)."
+            n=$(grep -c '^\[preset\.[0-9]*\]$' export_presets.cfg 2>/dev/null || true); n=${n:-0}
+            {
+              echo ""
+              echo "[preset.$n]"
+              echo 'name="Windows Desktop"'
+              echo 'platform="Windows Desktop"'
+              echo 'runnable=true'
+              echo 'export_filter="all_resources"'
+              echo 'include_filter=""'
+              echo 'exclude_filter=""'
+              echo 'export_path=""'
+              echo ""
+              echo "[preset.$n.options]"
+              echo 'binary_format/embed_pck=true'
+              echo 'binary_format/architecture="x86_64"'
+            } >> export_presets.cfg
+            name="Windows Desktop"
+          fi
+          echo "PRESET=$name" >> "$GITHUB_ENV"
+          echo "Export preset: $name"
+
+      - name: Export the game
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        working-directory: game
+        run: |
+          set -o pipefail
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          # first, import the assets (a fresh checkout has no .godot folder)
+          timeout 600 ~/godot/godot --headless --path . --import 2>&1 | tail -n 40 || true
+          if ! timeout 900 ~/godot/godot --headless --path . --export-${{ steps.what.outputs.mode }} "$PRESET" "$out/EnemySkies.exe" 2>&1 | tee "$RUNNER_TEMP/export.log"; then
+            echo "::error::Godot could not export the game."
+          fi
+          ls -la "$out"
+          if [ ! -s "$out/EnemySkies.exe" ]; then
+            grep -iE "error|fail" "$RUNNER_TEMP/export.log" | tail -n 15 | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::No EnemySkies.exe came out of the export."
+            exit 1
+          fi
+          cd "$out" && zip -qr9 "$RUNNER_TEMP/enemy-skies-${{ steps.what.outputs.version }}-windows.zip" . && ls -la "$RUNNER_TEMP"/*.zip
+
+      - name: Release notes
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        working-directory: game
+        run: |
+          version="${{ steps.what.outputs.version }}"
+          notes="$RUNNER_TEMP/notes.md"
+          # 1) a "## <version>" section in CHANGELOG.md, if the game has one
+          if [ -f CHANGELOG.md ]; then
+            awk -v v="$version" '
+              /^## / { if (on) exit; h=$0; sub(/^## +v?/, "", h); split(h, a, /[ (]/); if (a[1]==v) { on=1; next } }
+              on { print }' CHANGELOG.md > "$notes"
+          fi
+          # 2) otherwise: what the commits since the last release say
+          if [ ! -s "$notes" ]; then
+            prev=$(gh release view -R "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1)
+            range="HEAD"; [ -n "$prev" ] && git cat-file -e "$prev" 2>/dev/null && range="$prev..HEAD"
+            git log --no-merges --format='- %s' $range | grep -viE '^- (merge|wip)\b' | head -n 40 > "$notes" || true
+            [ -s "$notes" ] || echo "A new build." > "$notes"
+          fi
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "Get it from the **Paradoxiie Launcher**, or download the zip below, unzip it and run **EnemySkies.exe**."
+            echo ""
+            echo "<!-- commit: ${{ steps.what.outputs.commit }} -->"
+          } >> "$notes"
+          cat "$notes"
+
+      - name: Publish the release
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        run: |
+          version="${{ steps.what.outputs.version }}"
+          tag="v$version"
+          gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          ok=0
+          for try in 1 2 3; do
+            if gh release create "$tag" "$RUNNER_TEMP/enemy-skies-$version-windows.zip" -R "$GITHUB_REPOSITORY" --title "Enemy Skies v$version" --notes-file "$RUNNER_TEMP/notes.md" --latest 2> err.txt; then ok=1; break; fi
+            echo "::warning::try $try: $(tr '\n' ' ' < err.txt)"
+            gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+            sleep 10
+          done
+          [ $ok = 1 ] || { echo "::error::could not publish: $(tr '\n' ' ' < err.txt)"; exit 1; }
+
+      - name: Keep only the newest two releases
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        run: |
+          version="${{ steps.what.outputs.version }}"
+          kept=0
+          gh release list -R "$GITHUB_REPOSITORY" --limit 100 --json tagName,createdAt --jq 'sort_by(.createdAt) | reverse | .[].tagName' | while read -r tag; do
+            if [ "$tag" = "v$version" ]; then continue; fi
+            kept=$((kept + 1))
+            if [ "$kept" -le 1 ]; then continue; fi
+            gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done
+
+      - name: Note what was built
+        if: steps.what.outputs.skip != 'true'
+        shell: bash
+        working-directory: releases
+        run: |
+          # a small commit per release also keeps GitHub from switching off the 30-minute check
+          printf 'version=%s\ncommit=%s\ndate=%s\n' "${{ steps.what.outputs.version }}" "${{ steps.what.outputs.commit }}" "$(date -u +%FT%TZ)" > last-build.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add last-build.txt
+          git commit -qm "Released Enemy Skies v${{ steps.what.outputs.version }}" && git push -q || echo "::warning::could not record the build"
