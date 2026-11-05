@@ -171,7 +171,8 @@ jobs:
           fi
           # 2) otherwise: what the commits since the last release say
           if [ ! -s "$notes" ]; then
-            prev=$(gh release view -R "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1)
+            # (no release yet: no previous commit, so every commit so far)
+            prev=$( (gh release view -R "$GITHUB_REPOSITORY" --json body --jq .body 2>/dev/null || true) | sed -n 's/.*<!-- commit: \([0-9a-f]*\) -->.*/\1/p' | head -1)
             range="HEAD"; [ -n "$prev" ] && git cat-file -e "$prev" 2>/dev/null && range="$prev..HEAD"
             git log --no-merges --format='- %s' $range | grep -viE '^- (merge|wip)\b' | head -n 40 > "$notes" || true
             [ -s "$notes" ] || echo "A new build." > "$notes"
