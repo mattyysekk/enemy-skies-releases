@@ -155,6 +155,9 @@ jobs:
             exit 1
           fi
           cd "$out" && zip -qr9 "$RUNNER_TEMP/enemy-skies-${{ steps.what.outputs.version }}-windows.zip" . && ls -la "$RUNNER_TEMP"/*.zip
+          # the game cut into pieces: the Paradoxiie Launcher downloads only the pieces that changed
+          node "$GITHUB_WORKSPACE/releases/.github/paradoxiie/pack.mjs" "$out" "$RUNNER_TEMP/enemy-skies-${{ steps.what.outputs.version }}-windows"
+          ls -la "$RUNNER_TEMP"/*.pack "$RUNNER_TEMP"/*.chunks.json
 
       - name: Release notes
         if: steps.what.outputs.skip != 'true'
@@ -196,7 +199,7 @@ jobs:
           gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
           ok=0
           for try in 1 2 3; do
-            if gh release create "$tag" "$RUNNER_TEMP/enemy-skies-$version-windows.zip" -R "$GITHUB_REPOSITORY" --title "Enemy Skies v$version" --notes-file "$RUNNER_TEMP/notes.md" --latest 2> err.txt; then ok=1; break; fi
+            if gh release create "$tag" "$RUNNER_TEMP/enemy-skies-$version-windows.zip" "$RUNNER_TEMP/enemy-skies-$version-windows.pack" "$RUNNER_TEMP/enemy-skies-$version-windows.chunks.json" -R "$GITHUB_REPOSITORY" --title "Enemy Skies v$version" --notes-file "$RUNNER_TEMP/notes.md" --latest 2> err.txt; then ok=1; break; fi
             echo "::warning::try $try: $(tr '\n' ' ' < err.txt)"
             gh release delete "$tag" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
             sleep 10
