@@ -1,3 +1,3 @@
-version=0.7.0
-commit=5faf429f35e135af536c2b73713f208007c8f2f5
-date=2026-11-09T17:08:49Z
+version=0.7.1
+commit=2fcc3ec84214d6c79c1052cece48b3372fff8666
+date=2026-11-09T18:18:32Z
